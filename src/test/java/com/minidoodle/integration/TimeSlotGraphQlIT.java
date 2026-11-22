@@ -58,7 +58,42 @@ class TimeSlotGraphQlIT extends AbstractIntegrationTest {
                 .execute()
                 .path("createTimeSlot.id").entity(String.class).get();
 
-        // 2. Book slot1 via GraphQL mutation
+        // 2. Reject half-complete updateTimeSlot mutations (only startTime or only endTime) -> BAD_REQUEST
+        graphQlTester.document("""
+                mutation($input: UpdateSlotInput!) {
+                  updateTimeSlot(input: $input) { id }
+                }
+                """)
+                .variable("input", Map.of(
+                        "slotId", slot2Id,
+                        "userId", CAROL_ID.toString(),
+                        "startTime", day.plusHours(1).plusMinutes(15).toString()
+                ))
+                .execute()
+                .errors()
+                .satisfy(errors -> {
+                    assertThat(errors).hasSize(1);
+                    assertThat(errors.getFirst().getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+                });
+
+        graphQlTester.document("""
+                mutation($input: UpdateSlotInput!) {
+                  updateTimeSlot(input: $input) { id }
+                }
+                """)
+                .variable("input", Map.of(
+                        "slotId", slot2Id,
+                        "userId", CAROL_ID.toString(),
+                        "endTime", day.plusHours(2).plusMinutes(15).toString()
+                ))
+                .execute()
+                .errors()
+                .satisfy(errors -> {
+                    assertThat(errors).hasSize(1);
+                    assertThat(errors.getFirst().getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+                });
+
+        // 3. Book slot1 via GraphQL mutation
         graphQlTester.document("""
                 mutation($input: BookMeetingInput!) {
                   bookMeeting(input: $input) { id title participantEmails }
@@ -73,7 +108,7 @@ class TimeSlotGraphQlIT extends AbstractIntegrationTest {
                 .execute()
                 .path("bookMeeting.title").entity(String.class).isEqualTo("GraphQL Design Review");
 
-        // 3. Query userAvailability including nested `meeting` on all slots (verifies @BatchMapping)
+        // 4. Query userAvailability including nested `meeting` on all slots (verifies @BatchMapping)
         graphQlTester.document("""
                 query($userId: UUID!, $from: DateTime!, $to: DateTime!) {
                   userAvailability(userId: $userId, from: $from, to: $to) {
@@ -99,7 +134,7 @@ class TimeSlotGraphQlIT extends AbstractIntegrationTest {
                 .path("userAvailability.slots[0].meeting.title").entity(String.class).isEqualTo("GraphQL Design Review")
                 .path("userAvailability.slots[1].meeting").valueIsNull();
 
-        // 4. Verify overlap conflict returns GraphQL error with CONFLICT extension code
+        // 5. Verify overlap conflict returns GraphQL error with CONFLICT extension code
         graphQlTester.document("""
                 mutation($input: CreateSlotInput!) {
                   createTimeSlot(input: $input) { id }
@@ -117,7 +152,7 @@ class TimeSlotGraphQlIT extends AbstractIntegrationTest {
                     assertThat(errors.getFirst().getExtensions()).containsEntry("code", "CONFLICT");
                 });
 
-        // 5. Verify deleting a BOOKED slot returns BAD_REQUEST GraphQL error
+        // 6. Verify deleting a BOOKED slot returns BAD_REQUEST GraphQL error
         graphQlTester.document("""
                 mutation($userId: UUID!, $slotId: UUID!) {
                   deleteTimeSlot(userId: $userId, slotId: $slotId)
@@ -132,7 +167,7 @@ class TimeSlotGraphQlIT extends AbstractIntegrationTest {
                     assertThat(errors.getFirst().getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
                 });
 
-        // 6. Verify deleting a non-existent slot returns NOT_FOUND GraphQL error
+        // 7. Verify deleting a non-existent slot returns NOT_FOUND GraphQL error
         graphQlTester.document("""
                 mutation($userId: UUID!, $slotId: UUID!) {
                   deleteTimeSlot(userId: $userId, slotId: $slotId)
@@ -147,7 +182,7 @@ class TimeSlotGraphQlIT extends AbstractIntegrationTest {
                     assertThat(errors.getFirst().getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
                 });
 
-        // 7. Delete unbooked slot2 successfully
+        // 8. Delete unbooked slot2 successfully
         graphQlTester.document("""
                 mutation($userId: UUID!, $slotId: UUID!) {
                   deleteTimeSlot(userId: $userId, slotId: $slotId)

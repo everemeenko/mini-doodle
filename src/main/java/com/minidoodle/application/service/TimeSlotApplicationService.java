@@ -49,12 +49,18 @@ public class TimeSlotApplicationService {
 
     @Transactional
     public TimeSlot updateSlot(UpdateTimeSlotCommand command) {
+        if ((command.startTime() == null) != (command.endTime() == null)) {
+            throw new InvalidSlotOperationException(
+                    "Both startTime and endTime must be provided together when updating time bounds"
+            );
+        }
+
         Calendar calendar = calendarRepository.loadBySlotId(command.slotId())
                 .orElseThrow(() -> new ResourceNotFoundException("Time slot not found: " + command.slotId()));
 
         ensureCalendarBelongsToUser(calendar, command.userId());
 
-        TimeRange newRange = (command.startTime() != null && command.endTime() != null)
+        TimeRange newRange = (command.startTime() != null)
                 ? new TimeRange(command.startTime(), command.endTime())
                 : null;
 
@@ -64,6 +70,7 @@ public class TimeSlotApplicationService {
         return updated;
     }
 
+
     @Transactional
     public void deleteSlot(UUID userId, UUID slotId) {
         Calendar calendar = calendarRepository.loadBySlotId(slotId)
@@ -71,8 +78,8 @@ public class TimeSlotApplicationService {
 
         ensureCalendarBelongsToUser(calendar, userId);
 
-        calendar.removeSlot(slotId);
-        calendarRepository.deleteSlotById(slotId);
+        TimeSlot removed = calendar.removeSlot(slotId);
+        calendarRepository.deleteSlot(removed);
     }
 
     private void ensureCalendarBelongsToUser(Calendar calendar, UUID expectedUserId) {

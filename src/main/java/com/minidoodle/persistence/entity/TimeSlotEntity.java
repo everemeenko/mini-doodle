@@ -69,4 +69,10 @@ public class TimeSlotEntity {
     public void setStartTime(OffsetDateTime startTime) { this.startTime = startTime; }
     public void setEndTime(OffsetDateTime endTime) { this.endTime = endTime; }
     public void setStatus(SlotStatus status) { this.status = status; }
+    public void update(OffsetDateTime startTime, OffsetDateTime endTime, SlotStatus status) {
+        this.startTime = startTime;
+        this.endTime = endTime;
+        this.status = status;
+        this.updatedAt = OffsetDateTime.now();
+    }
 }

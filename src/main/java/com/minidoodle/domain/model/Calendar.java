@@ -40,10 +40,11 @@ public class Calendar {
         return slot;
     }
 
-    public void removeSlot(UUID slotId) {
+    public TimeSlot removeSlot(UUID slotId) {
         TimeSlot slot = findSlotOrThrow(slotId);
         slot.ensureDeletable();
-        this.slots.remove(slot);
+        slots.remove(slot);
+        return slot;
     }
 
     public Meeting scheduleMeeting(UUID slotId, String title, String description, java.util.Set<String> participants) {

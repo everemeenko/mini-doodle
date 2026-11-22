@@ -26,6 +26,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -34,7 +35,8 @@ public class MeetingApplicationService {
 
     private final CalendarRepository calendarRepository;
     private final MeetingRepository meetingRepository;
-    private final TransactionTemplate transactionTemplate;
+    private final TransactionTemplate writeTx;
+    private final TransactionTemplate requiresNewReadTx;
     private final ObservationRegistry observationRegistry;
     private final Counter bookingSuccessCounter;
     private final Counter bookingConflictCounter;
@@ -47,7 +49,14 @@ public class MeetingApplicationService {
                                      MeterRegistry meterRegistry) {
         this.calendarRepository = calendarRepository;
         this.meetingRepository = meetingRepository;
-        this.transactionTemplate = new TransactionTemplate(transactionManager);
+
+        this.writeTx = new TransactionTemplate(transactionManager);
+        this.writeTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        this.requiresNewReadTx = new TransactionTemplate(transactionManager);
+        this.requiresNewReadTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.requiresNewReadTx.setReadOnly(true);
+
         this.observationRegistry = observationRegistry;
         this.bookingSuccessCounter = Counter.builder("doodle.meetings.booked")
                 .description("Total number of successfully booked meetings")
@@ -70,17 +79,17 @@ public class MeetingApplicationService {
                 .lowCardinalityKeyValue("idempotent", String.valueOf(normalizedKey != null))
                 .highCardinalityKeyValue("slot.id", command.slotId().toString())
                 .observe(() -> {
-                    // 1. Fast-path check for existing idempotency key before acquiring slot version lock
+                    // 1. Fast-path check in an isolated read transaction
                     if (normalizedKey != null) {
-                        Optional<StoredIdempotentMeeting> existing = meetingRepository.findByIdempotencyKey(normalizedKey);
+                        Optional<StoredIdempotentMeeting> existing = findCommittedByKey(normalizedKey);
                         if (existing.isPresent()) {
                             return resolveExistingIdempotentBooking(existing.get(), requestHash);
                         }
                     }
 
-                    // 2. Execute atomic booking transaction
+                    // 2. Execute atomic booking in its own transaction
                     try {
-                        Meeting created = transactionTemplate.execute(status -> {
+                        Meeting created = writeTx.execute(status -> {
                             Calendar calendar = calendarRepository.loadBySlotId(command.slotId())
                                     .orElseThrow(() -> new ResourceNotFoundException("Time slot not found: " + command.slotId()));
 
@@ -99,11 +108,17 @@ public class MeetingApplicationService {
                         return new BookMeetingResult(created, true);
 
                     } catch (OptimisticLockingFailureException | DataIntegrityViolationException ex) {
-                        // 3. If two identical retries raced simultaneously, recover the winner's meeting
                         if (normalizedKey != null) {
-                            Optional<StoredIdempotentMeeting> winner = meetingRepository.findByIdempotencyKey(normalizedKey);
+                            // 3. Poll briefly in fresh REQUIRES_NEW snapshots until the racing winner's commit is visible
+                            Optional<StoredIdempotentMeeting> winner = awaitCommittedWinner(normalizedKey);
                             if (winner.isPresent()) {
                                 return resolveExistingIdempotentBooking(winner.get(), requestHash);
+                            }
+                            if (isIdempotencyKeyConstraintViolation(ex)) {
+                                bookingConflictCounter.increment();
+                                throw new IdempotencyConflictException(
+                                        "Concurrent request with the same Idempotency-Key is already in progress or conflicted"
+                                );
                             }
                         }
                         bookingConflictCounter.increment();
@@ -118,14 +133,47 @@ public class MeetingApplicationService {
                 .collect(Collectors.toMap(Meeting::getSlotId, Function.identity()));
     }
 
+    private Optional<StoredIdempotentMeeting> findCommittedByKey(String key) {
+        return requiresNewReadTx.execute(status -> meetingRepository.findByIdempotencyKey(key));
+    }
+
+    private Optional<StoredIdempotentMeeting> awaitCommittedWinner(String key) {
+        for (int attempt = 0; attempt < 4; attempt++) {
+            Optional<StoredIdempotentMeeting> found = findCommittedByKey(key);
+            if (found.isPresent()) {
+                return found;
+            }
+            try {
+                Thread.sleep(15L * (attempt + 1));
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return Optional.empty();
+    }
+
     private BookMeetingResult resolveExistingIdempotentBooking(StoredIdempotentMeeting stored, String expectedHash) {
         if (!stored.requestHash().equals(expectedHash)) {
+            bookingConflictCounter.increment();
             throw new IdempotencyConflictException(
                     "Idempotency-Key was already used with a different booking payload"
             );
         }
         bookingReplayCounter.increment();
         return new BookMeetingResult(stored.meeting(), false);
+    }
+
+    private boolean isIdempotencyKeyConstraintViolation(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String msg = current.getMessage();
+            if (msg != null && (msg.contains("meetings_idempotency_key_key") || msg.contains("idempotency_key"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private String normalizeKey(String key) {

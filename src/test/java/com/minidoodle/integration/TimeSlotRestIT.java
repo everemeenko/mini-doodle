@@ -61,7 +61,20 @@ class TimeSlotRestIT extends AbstractIntegrationTest {
                 .exchange()
                 .expectStatus().isBadRequest();
 
-        // 4. Reject invalid Bean Validation payloads (@NotBlank title, @Email participant) -> 400 Bad Request
+        // 4. Reject half-complete PATCH updates (only startTime or only endTime) -> 400 Bad Request
+        restClient.patch()
+                .uri("/api/v1/users/{userId}/slots/{slotId}", CAROL_ID, slot2.id())
+                .body(new UpdateSlotRequest(day.plusHours(1).plusMinutes(15), null, null))
+                .exchange()
+                .expectStatus().isBadRequest();
+
+        restClient.patch()
+                .uri("/api/v1/users/{userId}/slots/{slotId}", CAROL_ID, slot2.id())
+                .body(new UpdateSlotRequest(null, day.plusHours(2).plusMinutes(15), null))
+                .exchange()
+                .expectStatus().isBadRequest();
+
+        // 5. Reject invalid Bean Validation payloads (@NotBlank title, @Email participant) -> 400 Bad Request
         restClient.post()
                 .uri("/api/v1/slots/{slotId}/meetings", slot1.id())
                 .body(new BookMeetingRequest("   ", "Blank title", Set.of("alice@minidoodle.dev")))
@@ -74,14 +87,14 @@ class TimeSlotRestIT extends AbstractIntegrationTest {
                 .exchange()
                 .expectStatus().isBadRequest();
 
-        // 5. Reject booking a non-existent slot -> 404 Not Found
+        // 6. Reject booking a non-existent slot -> 404 Not Found
         restClient.post()
                 .uri("/api/v1/slots/{slotId}/meetings", UUID.randomUUID())
                 .body(new BookMeetingRequest("Ghost Slot", "Notes", Set.of("alice@minidoodle.dev")))
                 .exchange()
                 .expectStatus().isNotFound();
 
-        // 6. Toggle slot2 to BUSY
+        // 7. Toggle slot2 to BUSY
         TimeSlotResponse updatedSlot2 = restClient.patch()
                 .uri("/api/v1/users/{userId}/slots/{slotId}", CAROL_ID, slot2.id())
                 .body(new UpdateSlotRequest(null, null, SlotStatus.BUSY))
@@ -94,7 +107,7 @@ class TimeSlotRestIT extends AbstractIntegrationTest {
         assertThat(updatedSlot2).isNotNull();
         assertThat(updatedSlot2.status()).isEqualTo(SlotStatus.BUSY);
 
-        // 7. Book slot1 into a Meeting
+        // 8. Book slot1 into a Meeting
         MeetingResponse meeting = restClient.post()
                 .uri("/api/v1/slots/{slotId}/meetings", slot1.id())
                 .body(new BookMeetingRequest("1:1 Sync", "Quarterly goals", Set.of("carol@minidoodle.dev", "alice@minidoodle.dev")))
@@ -107,13 +120,13 @@ class TimeSlotRestIT extends AbstractIntegrationTest {
         assertThat(meeting).isNotNull();
         assertThat(meeting.slotId()).isEqualTo(slot1.id());
 
-        // 8. Attempt to delete BOOKED slot1 -> 400 Bad Request
+        // 9. Attempt to delete BOOKED slot1 -> 400 Bad Request
         restClient.delete()
                 .uri("/api/v1/users/{userId}/slots/{slotId}", CAROL_ID, slot1.id())
                 .exchange()
                 .expectStatus().isBadRequest();
 
-        // 9. Query aggregated availability (all statuses vs filtered by BUSY)
+        // 10. Query aggregated availability (all statuses vs filtered by BUSY)
         AvailabilityResponse fullSummary = restClient.get()
                 .uri(uriBuilder -> uriBuilder
                         .path("/api/v1/users/{userId}/availability")
@@ -149,7 +162,7 @@ class TimeSlotRestIT extends AbstractIntegrationTest {
         assertThat(busyOnly.slots()).hasSize(1);
         assertThat(busyOnly.slots().getFirst().id()).isEqualTo(slot2.id());
 
-        // 10. Delete unbooked slot2 -> 204 No Content, and missing slot -> 404 Not Found
+        // 11. Delete unbooked slot2 -> 204 No Content, and missing slot -> 404 Not Found
         restClient.delete()
                 .uri("/api/v1/users/{userId}/slots/{slotId}", CAROL_ID, slot2.id())
                 .exchange()

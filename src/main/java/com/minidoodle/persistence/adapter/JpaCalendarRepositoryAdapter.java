@@ -7,11 +7,17 @@ import com.minidoodle.domain.model.TimeSlot;
 import com.minidoodle.domain.repository.CalendarRepository;
 import com.minidoodle.persistence.entity.TimeSlotEntity;
 import com.minidoodle.persistence.jpa.SpringDataTimeSlotRepository;
-import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.stereotype.Repository;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.stereotype.Repository;
 
 @Repository
 public class JpaCalendarRepositoryAdapter implements CalendarRepository {
@@ -25,26 +31,23 @@ public class JpaCalendarRepositoryAdapter implements CalendarRepository {
     @Override
     public Calendar loadByUserIdAndWindow(UUID userId, TimeRange window) {
         List<TimeSlot> slots = jpaRepository
-            .findOverlappingSlots(userId, window.start(), window.end())
-            .stream()
-            .map(this::toDomain)
-            .toList();
-
+                .findOverlappingSlots(userId, window.start(), window.end())
+                .stream()
+                .map(this::toDomain)
+                .toList();
         return new Calendar(userId, slots);
     }
 
     @Override
     public Optional<Calendar> loadBySlotId(UUID slotId) {
         return jpaRepository.findById(slotId).map(target -> {
-            var searchStart = target.getStartTime().minusHours(24);
-            var searchEnd = target.getEndTime().plusHours(24);
-
+            OffsetDateTime windowStart = target.getStartTime().minusHours(24);
+            OffsetDateTime windowEnd = target.getEndTime().plusHours(24);
             List<TimeSlot> nearbySlots = jpaRepository
-                .findOverlappingSlots(target.getUserId(), searchStart, searchEnd)
-                .stream()
-                .map(this::toDomain)
-                .toList();
-
+                    .findOverlappingSlots(target.getUserId(), windowStart, windowEnd)
+                    .stream()
+                    .map(this::toDomain)
+                    .toList();
             return new Calendar(target.getUserId(), nearbySlots);
         });
     }
@@ -52,59 +55,81 @@ public class JpaCalendarRepositoryAdapter implements CalendarRepository {
     @Override
     public void save(Calendar calendar) {
         try {
+            List<UUID> existingIds = calendar.getSlots().stream()
+                    .filter(slot -> slot.getVersion() != null)
+                    .map(TimeSlot::getId)
+                    .toList();
+
+            Map<UUID, TimeSlotEntity> managedById = existingIds.isEmpty()
+                    ? Map.of()
+                    : jpaRepository.findAllById(existingIds).stream()
+                    .collect(Collectors.toMap(TimeSlotEntity::getId, Function.identity()));
+
             for (TimeSlot slot : calendar.getSlots()) {
                 if (slot.getVersion() == null) {
-                    jpaRepository.saveAndFlush(toEntity(slot));
+                    TimeSlotEntity entity = new TimeSlotEntity(
+                            slot.getId(),
+                            slot.getUserId(),
+                            slot.getTimeRange().start(),
+                            slot.getTimeRange().end(),
+                            slot.getStatus(),
+                            slot.getVersion()
+                    );
+                    jpaRepository.save(entity);
                 } else {
-                    TimeSlotEntity entity = jpaRepository.findById(slot.getId())
-                        .orElseThrow(() -> new IllegalStateException("Slot disappeared during update: " + slot.getId()));
-                    entity.setStartTime(slot.getTimeRange().start());
-                    entity.setEndTime(slot.getTimeRange().end());
-                    entity.setStatus(slot.getStatus());
-                    jpaRepository.saveAndFlush(entity);
+                    TimeSlotEntity existing = managedById.get(slot.getId());
+                    if (existing == null || !Objects.equals(existing.getVersion(), slot.getVersion())) {
+                        throw new ObjectOptimisticLockingFailureException(TimeSlotEntity.class, slot.getId());
+                    }
+
+                    boolean changed = !existing.getStartTime().isEqual(slot.getTimeRange().start())
+                            || !existing.getEndTime().isEqual(slot.getTimeRange().end())
+                            || existing.getStatus() != slot.getStatus();
+
+                    if (changed) {
+                        existing.update(
+                                slot.getTimeRange().start(),
+                                slot.getTimeRange().end(),
+                                slot.getStatus()
+                        );
+                    }
                 }
             }
+            jpaRepository.flush();
         } catch (DataIntegrityViolationException ex) {
             if (isOverlapConstraintViolation(ex)) {
-                throw new SlotOverlapException("Database prevented overlapping time slots for user: " + calendar.getUserId());
+                throw new SlotOverlapException("Database prevented overlapping time slots", ex);
             }
             throw ex;
         }
     }
 
     @Override
-    public void deleteSlotById(UUID slotId) {
-        jpaRepository.deleteById(slotId);
+    public void deleteSlot(TimeSlot slot) {
+        int deletedRows = jpaRepository.deleteByIdAndVersion(slot.getId(), slot.getVersion());
+        if (deletedRows == 0) {
+            throw new ObjectOptimisticLockingFailureException(TimeSlotEntity.class, slot.getId());
+        }
     }
 
     private TimeSlot toDomain(TimeSlotEntity entity) {
         return new TimeSlot(
-            entity.getId(),
-            entity.getUserId(),
-            new TimeRange(entity.getStartTime(), entity.getEndTime()),
-            entity.getStatus(),
-            entity.getVersion()
+                entity.getId(),
+                entity.getUserId(),
+                new TimeRange(entity.getStartTime(), entity.getEndTime()),
+                entity.getStatus(),
+                entity.getVersion()
         );
     }
 
-    private TimeSlotEntity toEntity(TimeSlot domain) {
-        return new TimeSlotEntity(
-            domain.getId(),
-            domain.getUserId(),
-            domain.getTimeRange().start(),
-            domain.getTimeRange().end(),
-            domain.getStatus(),
-            domain.getVersion()
-        );
-    }
-
-    private boolean isOverlapConstraintViolation(DataIntegrityViolationException ex) {
-        Throwable cause = ex;
-        while (cause != null) {
-            if (cause.getMessage() != null && cause.getMessage().contains("excl_user_overlapping_slots")) {
+    private boolean isOverlapConstraintViolation(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && message.contains("excl_user_overlapping_slots")) {
                 return true;
             }
-            cause = cause.getCause();
+            current = current.getCause();
         }
         return false;
     }

@@ -5,6 +5,7 @@ import java.time.OffsetDateTime;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import org.hibernate.annotations.BatchSize;
 
 @Entity
 @Table(name = "meetings")
@@ -31,12 +32,13 @@ public class MeetingEntity {
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
-    @ElementCollection(fetch = FetchType.EAGER)
+    @ElementCollection(fetch = FetchType.LAZY)
     @CollectionTable(
             name = "meeting_participants",
             joinColumns = @JoinColumn(name = "meeting_id")
     )
     @Column(name = "participant_email", nullable = false)
+    @BatchSize(size = 50)
     private Set<String> participantEmails = new HashSet<>();
 
     protected MeetingEntity() {}
@@ -63,4 +65,3 @@ public class MeetingEntity {
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public Set<String> getParticipantEmails() { return participantEmails; }
 }
-

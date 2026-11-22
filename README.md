@@ -11,16 +11,16 @@ Every requirement from the challenge specification is mapped below to its concre
 | Challenge Requirement (Verbatim) | How It Was Fulfilled |
 | :--- | :--- |
 | *"Your task is to design and implement a simplified version of the Doodle platform — a meeting scheduling platform."* | Implemented as a self-contained Spring Boot 4.2.0 service (`com.minidoodle`) supporting time-slot lifecycle management, idempotent meeting booking, participant tracking, and aggregated availability summaries. |
-| *"As a user, I should be able to create time slots in my calendar, modify or delete them, and mark them as busy or free."* | Exposed via **REST** (`POST`, `PATCH`, `DELETE /api/v1/users/{userId}/slots`) and **GraphQL** (`createTimeSlot`, `updateTimeSlot`, `deleteTimeSlot`). Slots transition freely between `FREE` and `BUSY`, while `BOOKED` slots are protected against mutation or deletion. |
-| *"Users should also be able to schedule meetings in available time slots, providing details like the meeting's title, description, and participants."* | Exposed via `POST /api/v1/slots/{slotId}/meetings` (REST, with optional `Idempotency-Key` header) and `bookMeeting` (GraphQL, with optional `idempotencyKey` input). Atomically transitions a `FREE` slot to `BOOKED` and persists the `Meeting` with its title, description, and validated participant email list. |
+| *"As a user, I should be able to create time slots in my calendar, modify or delete them, and mark them as busy or free."* | Exposed via **REST** (`POST`, `PATCH`, `DELETE /api/v1/users/{userId}/slots`) and **GraphQL** (`createTimeSlot`, `updateTimeSlot`, `deleteTimeSlot`). Slots transition freely between `FREE` and `BUSY`, require complete time bounds on reschedule, enforce optimistic version checks on update/delete, and protect `BOOKED` slots against mutation or deletion. |
+| *"Users should also be able to schedule meetings in available time slots, providing details like the meeting's title, description, and participants."* | Exposed via `POST /api/v1/slots/{slotId}/meetings` (REST, with optional `Idempotency-Key` header) and `bookMeeting` (GraphQL, with optional `idempotencyKey` input). Both APIs enforce Jakarta Bean Validation (`@Valid`) and atomically transition a `FREE` slot to `BOOKED` while persisting the `Meeting` and participant emails. |
 | *"Users should also be able to query available and busy time slots within a given time frame, with aggregated information to visualize their availability."* | Exposed via `GET /api/v1/users/{userId}/availability?from=...&to=...&status=...` (REST) and `userAvailability` (GraphQL). Returns `totalFreeMinutes`, `totalBusyMinutes`, `totalBookedMinutes` (accurately clipped to the requested window boundaries), and the chronological list of matching slots. |
-| *"The application should use a relational database to store users, time slots, and meetings, with a schema optimized for handling hundreds of users and thousands of time slots."* | Backed by **PostgreSQL 16** with **Flyway** migrations (`V1__init_schema.sql`, `V2__seed_data.sql`). Uses a composite B-tree index `(user_id, start_time, end_time, status)` for fast window queries, half-open `[start, end)` GiST exclusion constraints to prevent overlapping slots at the DB level, `UNIQUE` idempotency keys on `meetings`, and `@BatchMapping` in GraphQL to eliminate N+1 queries. |
-| *"Ensure the platform can handle high concurrency, especially when multiple users attempt to book the same time slot simultaneously."* | Protected with **JPA Optimistic Locking (`@Version`)** on `TimeSlotEntity` inside an atomic transaction boundary. When distinct users race for the same slot, one succeeds (`201 Created`) and concurrent losers fail fast with `409 Conflict` (REST) / `CONFLICT` error extension (GraphQL). When the same client retries with an `Idempotency-Key`, the existing meeting is safely replayed (`200 OK`). |
+| *"The application should use a relational database to store users, time slots, and meetings, with a schema optimized for handling hundreds of users and thousands of time slots."* | Backed by **PostgreSQL 16** with **Flyway** migrations (`V1__init_schema.sql`, `V2__seed_data.sql`). Uses a composite B-tree index `(user_id, start_time, end_time, status)` for fast window queries, half-open `[start, end)` GiST exclusion constraints to prevent overlapping slots at the DB level, `UNIQUE` idempotency keys on `meetings`, lazy participant collections with `@EntityGraph` batch queries, and GraphQL `@BatchMapping` to eliminate N+1 queries. |
+| *"Ensure the platform can handle high concurrency, especially when multiple users attempt to book the same time slot simultaneously."* | Protected with **JPA Optimistic Locking (`@Version`)** enforced across creates, updates, bookings, and atomic conditional deletes (`DELETE ... WHERE id = :id AND version = :version`). Concurrent booking races produce one `201 Created` winner and `409 Conflict` (REST) / `CONFLICT` classification (GraphQL) for competing users, while retries with the same `Idempotency-Key` safely replay `200 OK`. |
 | *"Remember that Calendar is just a domain concept; do not leak it outside the domain."* | `Calendar` exists strictly as the **Aggregate Root** inside `com.minidoodle.domain.model`. It encapsulates all overlap, status-transition, and booking invariants, and is never exposed in JPA entities, REST paths/DTOs, or the GraphQL schema. |
 | *"Create a git repository for the project; your first commit should include a skeleton README.md file."* | Structured with clean, incremental Git commits starting from an initial skeleton `README.md`. |
 | *"Document your design decisions, architecture, and any trade-offs in the README file."* | Documented in Sections 2 and 3 below. |
-| *"Include instructions on how to set up and run the application using Docker Compose."* | Provided in Section 4 (`docker-compose up --build` and optional `--profile observability` mode). |
-| *"Implement tests to ensure the correctness of your API endpoints."* | Verified by **12 unit, repository slice, and Testcontainers integration test classes** covering domain invariants, cross-user authorization, PostgreSQL GiST constraint translation, GraphQL `@BatchMapping`, 5-thread concurrent booking races, idempotent retries, and OpenTelemetry spans/metrics. |
+| *"Include instructions on how to set up and run the application using Docker Compose."* | Provided in Section 4 (`docker-compose up --build`, `--profile observability`, and `--profile test`). |
+| *"Implement tests to ensure the correctness of your API endpoints."* | Verified by **32 automated tests** (23 unit tests via Maven Surefire + 9 Testcontainers PostgreSQL integration/slice tests via Maven Failsafe) covering domain invariants, cross-user authorization, PostgreSQL GiST constraint translation, GraphQL `@BatchMapping` & validation, 5-thread concurrent booking races, idempotent retries, and OpenTelemetry spans/metrics. |
 | *"Using Java and Spring Boot is a must."* | Built on **Java 21** and **Spring Boot 4.2.0**. |
 | *"Extra points for metrics, observability, and API documentation."* | Instrumented with **OpenTelemetry** (custom spans & business counters), **Spring Boot Actuator / Prometheus**, interactive **Swagger UI** (`/swagger-ui.html`), and **GraphiQL** (`/graphiql`). |
 
@@ -39,37 +39,36 @@ com.minidoodle
 │   ├── command     # CreateTimeSlotCommand, UpdateTimeSlotCommand, BookMeetingCommand
 │   └── service     # TimeSlotApplicationService, MeetingApplicationService, AvailabilityApplicationService
 ├── persistence     # Outbound PostgreSQL / Spring Data JPA Adapters
-│   ├── entity      # TimeSlotEntity (@Version), MeetingEntity (idempotencyKey, requestHash)
-│   ├── jpa         # Indexed range & batch lookup queries
-│   └── adapter     # Maps Calendar <-> Entities & translates GiST violations to SlotOverlapException
+│   ├── entity      # TimeSlotEntity (@Version), MeetingEntity (lazy @ElementCollection + idempotencyKey)
+│   ├── jpa         # Indexed range queries, @EntityGraph batch queries & atomic versioned delete
+│   └── adapter     # Maps Calendar <-> Entities, enforces domain versions & translates GiST violations
 └── api             # Inbound Transport Adapters
     ├── rest        # REST Controllers, Jakarta Validation DTOs & GlobalRestExceptionHandler
-    └── graphql     # GraphQL Resolvers, Extended Scalars, @BatchMapping & GlobalGraphQlExceptionHandler
+    └── graphql     # GraphQL Resolvers, @Valid Inputs, @BatchMapping & GlobalGraphQlExceptionHandler
 ```
 
 ### Key Technical Trade-offs
 1. **Dual-Layer Overlap Prevention (Domain + PostgreSQL GiST):**
   * `Calendar` validates half-open `[start, end)` intervals in memory (allowing back-to-back slots such as `09:00–10:00` and `10:00–11:00`).
   * PostgreSQL enforces `EXCLUDE USING gist (user_id WITH =, tstzrange(start_time, end_time, '[)') WITH &&)` so even concurrent slot-creation requests cannot create overlapping intervals.
-2. **Optimistic Locking (`@Version`) vs. Pessimistic Locking (`SELECT FOR UPDATE`):**
-  * Chose **optimistic locking** on `TimeSlotEntity` because reads (`userAvailability`) heavily outnumber writes (`bookMeeting`), avoiding row-level lock contention while guaranteeing atomic single-winner booking semantics under bursts.
+2. **End-to-End Optimistic Locking & Atomic Conditional Deletes:**
+  * `JpaCalendarRepositoryAdapter` verifies the loaded domain `version` before mutating dirty slots (skipping untouched neighboring slots in the loaded window) and deletes slots via an atomic `DELETE FROM time_slots WHERE id = :id AND version = :version AND status <> 'BOOKED'`, preventing stale overwrites or delete-vs-booking races.
 3. **Retry-Safe Idempotent Booking (`Idempotency-Key` + SHA-256 Request Hash):**
   * Clients can pass an optional `Idempotency-Key` header (REST) or `idempotencyKey` input field (GraphQL).
-  * The service computes a canonical SHA-256 `request_hash` (`slotId` + `title` + `description` + sorted `participantEmails`). Identical retries replay the existing `Meeting` (`200 OK` in REST), simultaneous duplicate retries recover the winner's `Meeting`, and key reuse with a modified payload is rejected with `409 Conflict`.
-4. **Window-Sliced Aggregate Loading:**
-  * Instead of loading a user's entire multi-year history into `Calendar`, `loadByUserIdAndWindow` queries only slots intersecting `[from, to)` via the composite index `(user_id, start_time, end_time, status)`.
-5. **GraphQL N+1 Prevention (`@BatchMapping`):**
-  * Resolving `userAvailability { slots { meeting { ... } } }` uses `@BatchMapping` in `MeetingGraphQlController` to fetch all meetings in a single `WHERE slot_id IN (...)` query rather than issuing one SQL query per slot.
+  * The service computes a canonical SHA-256 `request_hash` (`slotId` + `title` + `description` + sorted `participantEmails`). Identical retries replay the existing `Meeting` (`200 OK` in REST), simultaneous duplicate retries recover the committed winner's `Meeting` in an isolated `REQUIRES_NEW` read transaction, and key reuse with a modified payload is rejected with `409 Conflict`.
+4. **Window-Sliced Aggregate Loading & N+1 Elimination:**
+  * `loadByUserIdAndWindow` queries only slots intersecting `[from, to)` via the composite index `(user_id, start_time, end_time, status)`.
+  * `MeetingEntity` uses `FetchType.LAZY` for `participantEmails`, while GraphQL `@BatchMapping` and `@EntityGraph` fetch all meetings and participants for visible slots in a single SQL query.
 
 ---
 
 ## 3. Quickstart with Docker Compose
 
 ### Prerequisites
-* **Docker** and **Docker Compose** (or **Java 21** + Docker to run `./mvnw test` locally).
+* **Docker** and **Docker Compose** (and optionally **Java 21** to run `./mvnw` directly on the host).
 
 ### Mode A: Standard Startup (PostgreSQL + Backend)
-Starts PostgreSQL 16, applies Flyway migrations (`V1__init_schema.sql` and `V2__seed_data.sql`), and launches the Spring Boot service with OTLP network exporters disabled so no collector is required:
+Runs unit tests during the Docker image build (`./mvnw clean package -B`), starts PostgreSQL 16, applies Flyway migrations (`V1__init_schema.sql` and `V2__seed_data.sql`), and launches the Spring Boot service with OTLP network exporters disabled so no collector is required:
 
 ```bash
 docker-compose up --build
@@ -80,6 +79,13 @@ Starts the application alongside **`grafana/otel-lgtm`** (Grafana + Tempo + Loki
 
 ```bash
 OTEL_TRACING_ENABLED=true OTEL_METRICS_ENABLED=true OTEL_LOGGING_ENABLED=true docker-compose --profile observability up --build
+```
+
+### Mode C: Run Full Integration Test Suite via Docker
+Executes `./mvnw verify -B` (unit tests + PostgreSQL Testcontainers integration tests) inside a container without needing a local JDK:
+
+```bash
+docker-compose --profile test run --rm integration-tests
 ```
 
 ### Available Endpoints & Playgrounds
@@ -188,7 +194,7 @@ mutation {
 }
 ```
 
-## 5.  Observability & Telemetry (OpenTelemetry + Grafana)
+## 5. Observability & Telemetry (OpenTelemetry + Grafana)
 
 * **Custom Business Spans:** `TimeSlotApplicationService` and `MeetingApplicationService` emit `doodle.slot.create` (tagged with `user.id`) and `doodle.meeting.book` (tagged with `slot.id`, `participants.count`, and `idempotent`), correlated automatically with HTTP/GraphQL and JDBC spans.
 * **Custom Business Counters:**
@@ -202,15 +208,26 @@ mutation {
   3. **Metrics:** Select **Prometheus** → query `doodle_meetings_booked_total`, `doodle_meetings_conflicts_total`, `doodle_meetings_idempotent_replays_total`, or `doodle_slots_created_total`.
   4. **Logs:** Select **Loki** → filter by `service_name="MiniDoodle"` to view logs linked to trace IDs.
 
-## 6.  Test Suite Structure
+## 6. Running the Test Suite
 
-* **Domain Unit Tests (`com.minidoodle.domain.model`):** `TimeRangeTest`, `MeetingTest`, `TimeSlotTest`, `CalendarTest`
-* **Application Service Unit Tests (`com.minidoodle.application.service`):** `ApplicationServiceUnitTest`
-* **Persistence Slice Tests (`com.minidoodle.persistence`):** `JpaRepositoryAdapterIT` (`@DataJpaTest` + Testcontainers verifying PostgreSQL GiST exclusion constraint translation and idempotency key lookups)
+Maven Surefire and Maven Failsafe are configured separately so fast unit tests and Docker-backed integration tests can be run independently or together:
+
+```bash
+# Run fast unit tests only (*Test via Surefire — no Docker required)
+./mvnw test
+
+# Run all unit tests (*Test) AND Testcontainers PostgreSQL integration tests (*IT via Failsafe — requires Docker)
+./mvnw verify
+```
+
+### Test Suite Structure
+
+* **Domain Unit Tests (`com.minidoodle.domain.model`):** `TimeRangeTest`, `MeetingTest`, `TimeSlotTest`, `CalendarTest` (17 tests)
+* **Application Service Unit Tests (`com.minidoodle.application.service`):** `ApplicationServiceUnitTest` (6 tests)
+* **Persistence Slice Tests (`com.minidoodle.persistence`):** `JpaRepositoryAdapterIT` (`@DataJpaTest` + Testcontainers verifying PostgreSQL GiST exclusion constraint translation and idempotency key lookups — 3 tests)
 * **Full-Stack Integration Tests (`com.minidoodle.integration`):**
-  * `TimeSlotRestIT` — REST CRUD, Bean Validation, status filters, and error codes (`400`, `404`, `409`)
-  * `TimeSlotGraphQlIT` — GraphQL queries/mutations, `@BatchMapping` nested meeting resolution, and error extensions
+  * `TimeSlotRestIT` — REST CRUD, Bean Validation, half-complete update rejection, status filters, and error codes (`400`, `404`, `409`)
+  * `TimeSlotGraphQlIT` — GraphQL queries/mutations, `@Valid` input constraints, `@BatchMapping` nested meeting resolution, and semantic `CONFLICT` / `BAD_REQUEST` / `NOT_FOUND` errors
   * `ConcurrencyBookingIT` — 5-thread `CyclicBarrier` race test verifying single-winner booking under contention
-  * `IdempotentBookingIT` — Verifies retry replay (`200 OK`), mismatched payload rejection (`409 Conflict`), and simultaneous duplicate retry convergence
-  * `OpenTelemetryIT` — Verifies custom OpenTelemetry spans and Micrometer counters via `InMemorySpanExporter`
-
+  * `IdempotentBookingIT` — Verifies retry replay (`200 OK`), mismatched payload rejection (`409 Conflict`), and simultaneous duplicate retry convergence (2 tests)
+  * `OpenTelemetryIT` — Verifies custom OpenTelemetry spans and Micrometer counters via synchronous `SimpleSpanProcessor` + `InMemorySpanExporter`

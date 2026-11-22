@@ -61,8 +61,24 @@ services:
     networks:
       - doodle-network
 
+  integration-tests:
+    image: eclipse-temurin:21-jdk-alpine
+    container_name: doodle-integration-tests
+    profiles:
+      - test
+    working_dir: /app
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+      - maven_cache:/root/.m2
+    environment:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+    command: ./mvnw verify -B
+
 volumes:
   postgres_data:
+  maven_cache:
 
 networks:
   doodle-network:

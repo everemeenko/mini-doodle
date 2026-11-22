@@ -7,7 +7,9 @@ import com.minidoodle.api.rest.dto.CreateSlotRequest;
 import com.minidoodle.api.rest.dto.TimeSlotResponse;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
+import io.opentelemetry.sdk.trace.SpanProcessor;
 import io.opentelemetry.sdk.trace.data.SpanData;
+import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -27,9 +29,15 @@ class OpenTelemetryIT extends AbstractIntegrationTest {
 
     @TestConfiguration
     static class OtelTestConfig {
+
         @Bean
         InMemorySpanExporter inMemorySpanExporter() {
             return InMemorySpanExporter.create();
+        }
+
+        @Bean
+        SpanProcessor inMemorySpanProcessor(InMemorySpanExporter exporter) {
+            return SimpleSpanProcessor.create(exporter);
         }
     }
 

@@ -2,6 +2,7 @@ package com.minidoodle.persistence.jpa;
 
 import com.minidoodle.persistence.entity.TimeSlotEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import java.time.OffsetDateTime;
@@ -22,4 +23,9 @@ public interface SpringDataTimeSlotRepository extends JpaRepository<TimeSlotEnti
         @Param("from") OffsetDateTime from,
         @Param("to") OffsetDateTime to
     );
+
+    @Modifying
+    @Query("DELETE FROM TimeSlotEntity t WHERE t.id = :id AND t.version = :version AND t.status <> 'BOOKED'")
+    int deleteByIdAndVersion(@Param("id") UUID id, @Param("version") Long version);
+
 }

@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
 class ApplicationServiceUnitTest {
@@ -55,18 +56,17 @@ class ApplicationServiceUnitTest {
         meterRegistry = new SimpleMeterRegistry();
         ObservationRegistry observationRegistry = ObservationRegistry.NOOP;
 
-        // Lightweight no-op PlatformTransactionManager so TransactionTemplate executes callbacks directly
         PlatformTransactionManager txManager = new PlatformTransactionManager() {
             @Override
-            public org.springframework.transaction.TransactionStatus getTransaction(TransactionDefinition definition) {
+            public TransactionStatus getTransaction(TransactionDefinition definition) {
                 return new SimpleTransactionStatus();
             }
 
             @Override
-            public void commit(org.springframework.transaction.TransactionStatus status) {}
+            public void commit(TransactionStatus status) {}
 
             @Override
-            public void rollback(org.springframework.transaction.TransactionStatus status) {}
+            public void rollback(TransactionStatus status) {}
         };
 
         timeSlotService = new TimeSlotApplicationService(calendarRepository, observationRegistry, meterRegistry);
@@ -95,7 +95,20 @@ class ApplicationServiceUnitTest {
                 .hasMessageContaining("does not belong to user");
 
         verify(calendarRepository, never()).save(any());
-        verify(calendarRepository, never()).deleteSlotById(any());
+        verify(calendarRepository, never()).deleteSlot(any());
+    }
+
+    @Test
+    void shouldDelegateVersionedSlotToRepositoryOnDelete() {
+        UUID ownerId = UUID.randomUUID();
+        TimeSlot slot = new TimeSlot(UUID.randomUUID(), ownerId, new TimeRange(BASE, BASE.plusHours(1)), SlotStatus.FREE, 3L);
+        Calendar ownerCalendar = new Calendar(ownerId, List.of(slot));
+
+        when(calendarRepository.loadBySlotId(slot.getId())).thenReturn(Optional.of(ownerCalendar));
+
+        timeSlotService.deleteSlot(ownerId, slot.getId());
+
+        verify(calendarRepository).deleteSlot(slot);
     }
 
     @Test
