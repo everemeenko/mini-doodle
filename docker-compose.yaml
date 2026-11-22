@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: doodle-postgres
+    environment:
+      POSTGRES_DB: doodle_db
+      POSTGRES_USER: doodle_user
+      POSTGRES_PASSWORD: doodle_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U doodle_user -d doodle_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - doodle-network
+
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    container_name: doodle-otel-lgtm
+    profiles:
+      - observability
+    ports:
+      - "3000:3000"   # Grafana UI (anonymous admin login enabled by default)
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    networks:
+      - doodle-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: doodle-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/doodle_db
+      SPRING_DATASOURCE_USERNAME: doodle_user
+      SPRING_DATASOURCE_PASSWORD: doodle_password
+      SPRING_JPA_HIBERNATE_DDL_AUTO: validate
+      SPRING_FLYWAY_ENABLED: "true"
+      SPRING_GRAPHQL_GRAPHIQL_ENABLED: "true"
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics,prometheus
+      OTEL_METRICS_ENABLED: ${OTEL_METRICS_ENABLED:-false}
+      OTEL_TRACING_ENABLED: ${OTEL_TRACING_ENABLED:-false}
+      OTEL_LOGGING_ENABLED: ${OTEL_LOGGING_ENABLED:-false}
+      APP_OTLP_ENDPOINT: ${APP_OTLP_ENDPOINT:-http://otel-lgtm:4318}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q 'UP' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - doodle-network
+
+volumes:
+  postgres_data:
+
+networks:
+  doodle-network:
+    driver: bridge

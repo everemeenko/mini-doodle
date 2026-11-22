@@ -1,0 +1,74 @@
+scalar UUID
+scalar DateTime
+
+enum SlotStatus {
+  FREE
+  BUSY
+  BOOKED
+}
+
+type TimeSlot {
+  id: UUID!
+  userId: UUID!
+  startTime: DateTime!
+  endTime: DateTime!
+  status: SlotStatus!
+  meeting: Meeting
+}
+
+type Meeting {
+  id: UUID!
+  slotId: UUID!
+  title: String!
+  description: String
+  participantEmails: [String!]!
+  createdAt: DateTime!
+}
+
+type AvailabilitySummary {
+  userId: UUID!
+  from: DateTime!
+  to: DateTime!
+  totalFreeMinutes: Int!
+  totalBusyMinutes: Int!
+  totalBookedMinutes: Int!
+  slots: [TimeSlot!]!
+}
+
+input CreateSlotInput {
+  userId: UUID!
+  startTime: DateTime!
+  endTime: DateTime!
+}
+
+input UpdateSlotInput {
+  slotId: UUID!
+  userId: UUID!
+  startTime: DateTime
+  endTime: DateTime
+  status: SlotStatus
+}
+
+input BookMeetingInput {
+  slotId: UUID!
+  title: String!
+  description: String
+  participants: [String!]!
+  idempotencyKey: String
+}
+
+type Query {
+  userAvailability(
+    userId: UUID!
+    from: DateTime!
+    to: DateTime!
+    status: SlotStatus
+  ): AvailabilitySummary!
+}
+
+type Mutation {
+  createTimeSlot(input: CreateSlotInput!): TimeSlot!
+  updateTimeSlot(input: UpdateSlotInput!): TimeSlot!
+  deleteTimeSlot(userId: UUID!, slotId: UUID!): Boolean!
+  bookMeeting(input: BookMeetingInput!): Meeting!
+}
