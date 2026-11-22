@@ -140,5 +140,63 @@ class IdempotentBookingIT extends AbstractIntegrationTest {
                 .extracting(MeetingResponse::id)
                 .containsOnly(responses.getFirst().id());
     }
-}
 
+    @Test
+    void shouldRejectSimultaneousDifferentPayloadRaceWithSameKey() throws Exception {
+        OffsetDateTime start = OffsetDateTime.now(ZoneOffset.UTC)
+                .plusDays(72).withHour(15).withMinute(0).withSecond(0).withNano(0);
+
+        TimeSlotResponse slot = restClient.post()
+                .uri("/api/v1/users/{userId}/slots", CAROL_ID)
+                .body(new CreateSlotRequest(start, start.plusHours(1)))
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(TimeSlotResponse.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(slot).isNotNull();
+
+        String sharedKey = "collision-race-" + UUID.randomUUID();
+
+        int threads = 5;
+        CyclicBarrier barrier = new CyclicBarrier(threads);
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+
+        List<Callable<Integer>> tasks = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            final int index = i;
+            tasks.add(() -> {
+                RestTestClient client = RestTestClient.bindToServer()
+                        .baseUrl("http://localhost:" + port)
+                        .build();
+                barrier.await();
+                return client.post()
+                        .uri("/api/v1/slots/{slotId}/meetings", slot.id())
+                        .header("Idempotency-Key", sharedKey)
+                        .body(new BookMeetingRequest(
+                                "Conflicting Title #" + index,
+                                "Distinct payload per thread",
+                                Set.of("user" + index + "@minidoodle.dev")
+                        ))
+                        .exchange()
+                        .returnResult(String.class)
+                        .getStatus()
+                        .value();
+            });
+        }
+
+        List<Integer> statusCodes = new ArrayList<>();
+        for (Future<Integer> future : executor.invokeAll(tasks)) {
+            statusCodes.add(future.get());
+        }
+        executor.shutdown();
+
+        long createdCount = statusCodes.stream().filter(code -> code == 201).count();
+        long conflictCount = statusCodes.stream().filter(code -> code == 409).count();
+
+        // Advisory lock serializes same-key requests: 1 wins with 201, 4 fail cleanly with 409 Conflict
+        assertThat(createdCount).isEqualTo(1L);
+        assertThat(conflictCount).isEqualTo(threads - 1L);
+    }
+}

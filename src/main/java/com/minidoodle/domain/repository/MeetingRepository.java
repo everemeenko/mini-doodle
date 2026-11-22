@@ -8,6 +8,7 @@ import java.util.UUID;
 public interface MeetingRepository {
     record StoredIdempotentMeeting(Meeting meeting, String requestHash) {}
 
+    void acquireIdempotencyLock(String idempotencyKey);
     Meeting save(Meeting meeting, String idempotencyKey, String requestHash);
     Optional<StoredIdempotentMeeting> findByIdempotencyKey(String idempotencyKey);
     List<Meeting> findAllBySlotIds(List<UUID> slotIds);

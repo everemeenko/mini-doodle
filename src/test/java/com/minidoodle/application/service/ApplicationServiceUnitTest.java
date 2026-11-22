@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -33,11 +34,8 @@ import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.springframework.dao.OptimisticLockingFailureException;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.TransactionStatus;
-import org.springframework.transaction.support.SimpleTransactionStatus;
 
 class ApplicationServiceUnitTest {
 
@@ -56,22 +54,9 @@ class ApplicationServiceUnitTest {
         meterRegistry = new SimpleMeterRegistry();
         ObservationRegistry observationRegistry = ObservationRegistry.NOOP;
 
-        PlatformTransactionManager txManager = new PlatformTransactionManager() {
-            @Override
-            public TransactionStatus getTransaction(TransactionDefinition definition) {
-                return new SimpleTransactionStatus();
-            }
-
-            @Override
-            public void commit(TransactionStatus status) {}
-
-            @Override
-            public void rollback(TransactionStatus status) {}
-        };
-
         timeSlotService = new TimeSlotApplicationService(calendarRepository, observationRegistry, meterRegistry);
         meetingService = new MeetingApplicationService(
-                calendarRepository, meetingRepository, txManager, observationRegistry, meterRegistry
+                calendarRepository, meetingRepository, observationRegistry, meterRegistry
         );
     }
 
@@ -126,7 +111,7 @@ class ApplicationServiceUnitTest {
     }
 
     @Test
-    void shouldIncrementConflictCounterWhenOptimisticLockFailsDuringNonIdempotentBooking() {
+    void shouldIncrementConflictCounterWhenOptimisticLockFailsDuringBooking() {
         UUID ownerId = UUID.randomUUID();
         TimeSlot slot = new TimeSlot(UUID.randomUUID(), ownerId, new TimeRange(BASE, BASE.plusHours(1)), SlotStatus.FREE, 0L);
         Calendar calendar = new Calendar(ownerId, List.of(slot));
@@ -144,7 +129,7 @@ class ApplicationServiceUnitTest {
     }
 
     @Test
-    void shouldRejectReusedIdempotencyKeyWhenRequestHashDiffers() {
+    void shouldAcquireAdvisoryLockBeforeCheckingExistingIdempotencyKey() {
         UUID slotId = UUID.randomUUID();
         Meeting existingMeeting = new Meeting(
                 UUID.randomUUID(), slotId, "Original Sync", "Notes", Set.of("alice@minidoodle.dev"), BASE
@@ -159,6 +144,9 @@ class ApplicationServiceUnitTest {
                 .isInstanceOf(IdempotencyConflictException.class)
                 .hasMessageContaining("different booking payload");
 
+        InOrder order = inOrder(meetingRepository);
+        order.verify(meetingRepository).acquireIdempotencyLock("idem-key-123");
+        order.verify(meetingRepository).findByIdempotencyKey("idem-key-123");
         verify(calendarRepository, never()).loadBySlotId(any());
     }
 
